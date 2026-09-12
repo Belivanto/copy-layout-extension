@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Copy Layout",
+  "version": "1.0.0",
+  "description": "Capture the layout (HTML structure + computed styles) of the page you're viewing and copy it to your clipboard or download it as a standalone HTML file.",
+  "permissions": ["activeTab", "scripting", "clipboardWrite"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Copy Layout"
+  }
+}

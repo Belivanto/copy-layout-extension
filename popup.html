@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Copy Layout</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header>
+    <h1>Copy Layout</h1>
+    <p class="subtitle">Capture the current page's structure &amp; styles</p>
+  </header>
+
+  <main>
+    <label class="option">
+      <input type="checkbox" id="excludeImages" />
+      ไม่รวมรูปภาพ (แทนที่ด้วยกล่องสีขาว)
+    </label>
+
+    <div class="actions">
+      <button id="copyBtn" class="primary">Copy Layout</button>
+      <button id="downloadBtn">Download HTML</button>
+    </div>
+
+    <p id="status" class="status" role="status"></p>
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>
