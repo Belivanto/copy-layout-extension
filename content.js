@@ -75,6 +75,41 @@ function captureLayout(options = {}) {
     return span;
   }
 
+  // Plain HTML has no notion of shadow DOM, so a custom element's real
+  // rendered content (inside its shadow root) has to be flattened into the
+  // light DOM here — otherwise it's just an empty tag in the output. A
+  // closed shadow root (el.shadowRoot === null) can't be read from outside
+  // at all; that's a hard JS/platform limitation, not something to work around.
+  function appendResolvedChild(parentClone, node) {
+    if (node.nodeType === Node.ELEMENT_NODE && node.tagName === "SLOT") {
+      const assigned = node.assignedNodes ? node.assignedNodes({ flatten: true }) : [];
+      const projected = assigned.length ? assigned : node.childNodes; // fall back to <slot> default content
+      for (const projectedNode of projected) {
+        appendResolvedChild(parentClone, projectedNode);
+      }
+      return;
+    }
+    const clonedChild = cloneNode(node);
+    if (clonedChild) parentClone.appendChild(clonedChild);
+  }
+
+  function cloneChildrenInto(clone, el) {
+    const source = el.shadowRoot || el;
+    for (const child of source.childNodes) {
+      appendResolvedChild(clone, child);
+    }
+  }
+
+  function makeImagePlaceholder(el) {
+    const placeholder = document.createElement("div");
+    placeholder.setAttribute(
+      "style",
+      `${styleString(el)}; background-color: #ffffff; display: flex; align-items: center; justify-content: center; overflow: hidden; color: #999999; font-size: 12px; font-family: sans-serif;`
+    );
+    placeholder.textContent = "picture";
+    return placeholder;
+  }
+
   function cloneNode(node) {
     if (node.nodeType === Node.TEXT_NODE) {
       return document.createTextNode(node.textContent);
@@ -88,13 +123,23 @@ function captureLayout(options = {}) {
     if (computed.display === "none") return null;
 
     if (el.tagName === "IMG" && excludeImages) {
-      const placeholder = document.createElement("div");
-      placeholder.setAttribute(
-        "style",
-        `${styleString(el)}; background-color: #ffffff; display: flex; align-items: center; justify-content: center; overflow: hidden; color: #999999; font-size: 12px; font-family: sans-serif;`
-      );
-      placeholder.textContent = "picture";
-      return placeholder;
+      return makeImagePlaceholder(el);
+    }
+
+    if (el.tagName === "CANVAS") {
+      if (excludeImages) return makeImagePlaceholder(el);
+      const img = document.createElement("img");
+      img.setAttribute("style", styleString(el));
+      try {
+        // Rendered pixels only exist on the canvas itself, never in the DOM,
+        // so this is the only way to carry them into a static HTML export.
+        img.setAttribute("src", el.toDataURL());
+      } catch {
+        // Cross-origin drawing "taints" the canvas and blocks pixel reads
+        // entirely — no way around that, so fall back to a placeholder.
+        return makeImagePlaceholder(el);
+      }
+      return img;
     }
 
     const clone = document.createElement(el.tagName.toLowerCase());
@@ -109,10 +154,7 @@ function captureLayout(options = {}) {
       const beforeEl = makePseudoElement(el, "before");
       if (beforeEl) clone.appendChild(beforeEl);
 
-      for (const child of el.childNodes) {
-        const clonedChild = cloneNode(child);
-        if (clonedChild) clone.appendChild(clonedChild);
-      }
+      cloneChildrenInto(clone, el);
 
       const afterEl = makePseudoElement(el, "after");
       if (afterEl) clone.appendChild(afterEl);
