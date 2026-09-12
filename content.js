@@ -18,7 +18,9 @@ function captureLayout(options = {}) {
     "overflow", "overflow-x", "overflow-y", "z-index", "visibility", "opacity",
     "font-family", "font-size", "font-weight", "font-style", "line-height", "letter-spacing", "text-align", "text-decoration",
     "color", "background-color", "background-image", "background-size", "background-position", "background-repeat",
-    "box-shadow", "cursor", "white-space", "vertical-align", "object-fit",
+    "box-shadow", "cursor", "white-space", "vertical-align", "object-fit", "object-position",
+    "transform", "transform-origin", "filter", "backdrop-filter",
+    "mix-blend-mode", "background-blend-mode", "background-attachment", "clip-path", "aspect-ratio",
   ];
 
   const SKIP_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "LINK", "META", "TITLE"]);
@@ -34,8 +36,7 @@ function captureLayout(options = {}) {
     });
   }
 
-  function styleString(el) {
-    const computed = getComputedStyle(el);
+  function styleStringFromComputed(computed) {
     const parts = [];
     let hadImageBackground = false;
     for (const prop of LAYOUT_PROPS) {
@@ -51,6 +52,27 @@ function captureLayout(options = {}) {
       parts.push("background-color: #ffffff");
     }
     return parts.join("; ");
+  }
+
+  function styleString(el) {
+    return styleStringFromComputed(getComputedStyle(el));
+  }
+
+  // Decorative overlays (gradients, icon glyphs, shapes) are very often drawn
+  // via ::before/::after rather than real DOM nodes, so a DOM-only walk misses
+  // them entirely. Re-create them as real elements carrying the same styles.
+  function makePseudoElement(el, pseudo) {
+    const computed = getComputedStyle(el, `::${pseudo}`);
+    if (!computed || computed.content === "none" || computed.display === "none") return null;
+
+    const span = document.createElement("span");
+    span.setAttribute("style", styleStringFromComputed(computed));
+
+    const stringMatch = /^["'](.*)["']$/.exec(computed.content);
+    if (stringMatch) {
+      span.textContent = stringMatch[1];
+    }
+    return span;
   }
 
   function cloneNode(node) {
@@ -84,16 +106,67 @@ function captureLayout(options = {}) {
     } else if (el.tagName === "SVG" || el instanceof SVGElement) {
       return el.cloneNode(true);
     } else {
+      const beforeEl = makePseudoElement(el, "before");
+      if (beforeEl) clone.appendChild(beforeEl);
+
       for (const child of el.childNodes) {
         const clonedChild = cloneNode(child);
         if (clonedChild) clone.appendChild(clonedChild);
       }
+
+      const afterEl = makePseudoElement(el, "after");
+      if (afterEl) clone.appendChild(afterEl);
     }
 
     return clone;
   }
 
-  const bodyClone = cloneNode(document.body);
+  // Computed styles only ever report a font-family *name* — the actual font
+  // files come from @font-face rules or <link> stylesheets (e.g. Google
+  // Fonts), which live in <head> and are otherwise never carried over. Without
+  // them the exported page silently falls back to a generic system font.
+  function collectFontStyles() {
+    const headExtras = [];
+    const fontFaceCssParts = [];
+
+    for (const sheet of document.styleSheets) {
+      let rules;
+      try {
+        rules = sheet.cssRules;
+      } catch {
+        // Cross-origin stylesheet we can't inspect from script (most of these
+        // are font providers like Google Fonts) — just re-link it so the
+        // browser fetches it normally when the exported page is opened.
+        if (sheet.href) {
+          headExtras.push(`<link rel="stylesheet" href="${sheet.href}">`);
+        }
+        continue;
+      }
+      if (!rules) continue;
+      for (const rule of rules) {
+        if (rule.type === CSSRule.FONT_FACE_RULE) {
+          const base = sheet.href || document.baseURI;
+          const cssText = rule.cssText.replace(/url\((['"]?)(.*?)\1\)/g, (match, quote, url) => {
+            if (/^(data:|https?:)/.test(url)) return match;
+            try {
+              return `url("${new URL(url, base).href}")`;
+            } catch {
+              return match;
+            }
+          });
+          fontFaceCssParts.push(cssText);
+        }
+      }
+    }
+
+    if (fontFaceCssParts.length) {
+      headExtras.push(`<style>${fontFaceCssParts.join("\n")}</style>`);
+    }
+    return headExtras.join("\n");
+  }
+
+  const bodyClone = cloneNode(options.root || document.body);
+  const fontStyles = collectFontStyles();
   const html = `<!DOCTYPE html>
 <html>
 <head>
@@ -103,9 +176,95 @@ function captureLayout(options = {}) {
   * { box-sizing: border-box; }
   body { margin: 0; }
 </style>
+${fontStyles}
 </head>
 ${bodyClone.outerHTML}
 </html>`;
 
   return html;
+}
+
+// Lets the user click an element on the page to capture just that subtree
+// instead of the whole body. Runs entirely in the page context so the
+// resulting clipboard write/download still counts as triggered by the same
+// user click (the popup itself closes as soon as the page is clicked).
+function startElementPicker(options = {}) {
+  if (window.__copyLayoutPickerActive) return;
+  window.__copyLayoutPickerActive = true;
+
+  const Z = 2147483647;
+  const overlay = document.createElement("div");
+  overlay.style.cssText = `position:fixed;display:none;pointer-events:none;z-index:${Z};border:2px solid #4f46e5;background:rgba(79,70,229,0.15);`;
+  document.documentElement.appendChild(overlay);
+
+  const banner = document.createElement("div");
+  banner.textContent = "คลิกเลือก element ที่ต้องการ copy layout (กด Esc เพื่อยกเลิก)";
+  banner.style.cssText = `position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:${Z};background:#1a1a1a;color:#fff;padding:8px 14px;border-radius:6px;font:13px sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.3);`;
+  document.documentElement.appendChild(banner);
+
+  function showToast(message) {
+    const toast = document.createElement("div");
+    toast.textContent = message;
+    toast.style.cssText = `position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:${Z};background:#16a34a;color:#fff;padding:8px 14px;border-radius:6px;font:13px sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.3);`;
+    document.documentElement.appendChild(toast);
+    setTimeout(() => toast.remove(), 2500);
+  }
+
+  let currentTarget = null;
+
+  function onMouseMove(e) {
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    if (!el || el === currentTarget || el === overlay || el === banner) return;
+    currentTarget = el;
+    const rect = el.getBoundingClientRect();
+    overlay.style.display = "block";
+    overlay.style.top = `${rect.top}px`;
+    overlay.style.left = `${rect.left}px`;
+    overlay.style.width = `${rect.width}px`;
+    overlay.style.height = `${rect.height}px`;
+  }
+
+  function cleanup() {
+    document.removeEventListener("mousemove", onMouseMove, true);
+    document.removeEventListener("click", onClick, true);
+    document.removeEventListener("keydown", onKeyDown, true);
+    overlay.remove();
+    banner.remove();
+    window.__copyLayoutPickerActive = false;
+  }
+
+  async function onClick(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    const target = currentTarget || e.target;
+    cleanup();
+
+    const html = captureLayout({ excludeImages: options.excludeImages, root: target });
+
+    if (options.action === "download") {
+      const blob = new Blob([html], { type: "text/html" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "element-layout.html";
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast("ดาวน์โหลด layout ของ element แล้ว");
+    } else {
+      try {
+        await navigator.clipboard.writeText(html);
+        showToast("คัดลอก layout ของ element แล้ว");
+      } catch (err) {
+        showToast(`คัดลอกไม่สำเร็จ: ${err.message}`);
+      }
+    }
+  }
+
+  function onKeyDown(e) {
+    if (e.key === "Escape") cleanup();
+  }
+
+  document.addEventListener("mousemove", onMouseMove, true);
+  document.addEventListener("click", onClick, true);
+  document.addEventListener("keydown", onKeyDown, true);
 }
