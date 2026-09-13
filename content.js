@@ -226,6 +226,28 @@ ${bodyClone.outerHTML}
   return html;
 }
 
+// Wraps a captured layout in an instruction template so it can be pasted
+// straight into an AI chat and asked to rebuild the page, instead of just
+// handing over the raw standalone HTML.
+function buildLayoutPrompt(html, pageTitle, lang) {
+  if (lang === "en") {
+    return `You are a frontend developer. Recreate this webpage using HTML and CSS, keeping the structure, layout, colors, fonts, and spacing as close to the original as possible (organize the code well, e.g. use classes instead of inline styles where feasible). If you see a white box with the text "picture", treat it as a spot where an image was removed and insert a placeholder image there instead.
+
+Here is the original layout (title: "${pageTitle}"):
+
+\`\`\`html
+${html}
+\`\`\``;
+  }
+  return `คุณคือ Frontend Developer ช่วยสร้างหน้าเว็บนี้ขึ้นมาใหม่โดยใช้ HTML และ CSS ให้มีโครงสร้าง การจัดวาง สี ฟอนต์ และระยะห่างใกล้เคียงต้นฉบับมากที่สุด (จัดโค้ดให้เป็นระเบียบ เช่น แยก CSS เป็น class แทน inline style ถ้าเป็นไปได้) หากพบกล่องสีขาวที่มีข้อความ "picture" ให้เข้าใจว่าเป็นตำแหน่งรูปภาพที่ถูกเอาออกไป ให้ใส่ placeholder image แทนที่ตำแหน่งนั้น
+
+นี่คือ layout ต้นฉบับ (title: "${pageTitle}"):
+
+\`\`\`html
+${html}
+\`\`\``;
+}
+
 // Lets the user click an element on the page to capture just that subtree
 // instead of the whole body. Runs entirely in the page context so the
 // resulting clipboard write/download still counts as triggered by the same
@@ -234,13 +256,29 @@ function startElementPicker(options = {}) {
   if (window.__copyLayoutPickerActive) return;
   window.__copyLayoutPickerActive = true;
 
+  const PICKER_STRINGS = {
+    th: {
+      banner: "คลิกเลือก element ที่ต้องการ copy layout (กด Esc เพื่อยกเลิก)",
+      downloaded: "ดาวน์โหลด layout ของ element แล้ว",
+      copied: "คัดลอก layout ของ element แล้ว",
+      copyFailed: (msg) => `คัดลอกไม่สำเร็จ: ${msg}`,
+    },
+    en: {
+      banner: "Click the element you want to copy the layout of (press Esc to cancel)",
+      downloaded: "Downloaded the element's layout",
+      copied: "Copied the element's layout",
+      copyFailed: (msg) => `Copy failed: ${msg}`,
+    },
+  };
+  const s = PICKER_STRINGS[options.lang] || PICKER_STRINGS.th;
+
   const Z = 2147483647;
   const overlay = document.createElement("div");
   overlay.style.cssText = `position:fixed;display:none;pointer-events:none;z-index:${Z};border:2px solid #4f46e5;background:rgba(79,70,229,0.15);`;
   document.documentElement.appendChild(overlay);
 
   const banner = document.createElement("div");
-  banner.textContent = "คลิกเลือก element ที่ต้องการ copy layout (กด Esc เพื่อยกเลิก)";
+  banner.textContent = s.banner;
   banner.style.cssText = `position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:${Z};background:#1a1a1a;color:#fff;padding:8px 14px;border-radius:6px;font:13px sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.3);`;
   document.documentElement.appendChild(banner);
 
@@ -281,23 +319,24 @@ function startElementPicker(options = {}) {
     const target = currentTarget || e.target;
     cleanup();
 
-    const html = captureLayout({ excludeImages: options.excludeImages, root: target });
+    const rawHtml = captureLayout({ excludeImages: options.excludeImages, root: target });
+    const output = options.promptMode ? buildLayoutPrompt(rawHtml, document.title, options.lang) : rawHtml;
 
     if (options.action === "download") {
-      const blob = new Blob([html], { type: "text/html" });
+      const blob = new Blob([output], { type: options.promptMode ? "text/plain" : "text/html" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = "element-layout.html";
+      a.download = options.promptMode ? "element-layout-prompt.txt" : "element-layout.html";
       a.click();
       URL.revokeObjectURL(url);
-      showToast("ดาวน์โหลด layout ของ element แล้ว");
+      showToast(s.downloaded);
     } else {
       try {
-        await navigator.clipboard.writeText(html);
-        showToast("คัดลอก layout ของ element แล้ว");
+        await navigator.clipboard.writeText(output);
+        showToast(s.copied);
       } catch (err) {
-        showToast(`คัดลอกไม่สำเร็จ: ${err.message}`);
+        showToast(s.copyFailed(err.message));
       }
     }
   }

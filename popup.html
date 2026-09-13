@@ -7,19 +7,30 @@
 </head>
 <body>
   <header>
-    <h1>Copy Layout</h1>
-    <p class="subtitle">Capture the current page's structure &amp; styles</p>
+    <div class="header-row">
+      <h1>Copy Layout</h1>
+      <div class="lang-switch" role="group">
+        <button type="button" class="lang-option" id="langTh">TH</button>
+        <button type="button" class="lang-option" id="langEn">EN</button>
+      </div>
+    </div>
+    <p class="subtitle" id="subtitle">Capture the current page's structure &amp; styles</p>
   </header>
 
   <main>
     <label class="option">
       <input type="checkbox" id="excludeImages" />
-      ไม่รวมรูปภาพ (แทนที่ด้วยกล่องสีขาว)
+      <span id="excludeImagesLabel">ไม่รวมรูปภาพ (แทนที่ด้วยกล่องสีขาว)</span>
     </label>
 
     <label class="option">
       <input type="checkbox" id="pickElement" />
-      เลือกเฉพาะ element (คลิกบนหน้าเว็บ)
+      <span id="pickElementLabel">เลือกเฉพาะ element (คลิกบนหน้าเว็บ)</span>
+    </label>
+
+    <label class="option">
+      <input type="checkbox" id="promptMode" />
+      <span id="promptModeLabel">สร้างเป็น Prompt สำหรับ AI (มีคำสั่งกำกับ)</span>
     </label>
 
     <div class="actions">
