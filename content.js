@@ -226,26 +226,154 @@ ${bodyClone.outerHTML}
   return html;
 }
 
-// Wraps a captured layout in an instruction template so it can be pasted
-// straight into an AI chat and asked to rebuild the page, instead of just
-// handing over the raw standalone HTML.
-function buildLayoutPrompt(html, pageTitle, lang) {
-  if (lang === "en") {
-    return `You are a frontend developer. Recreate this webpage using HTML and CSS, keeping the structure, layout, colors, fonts, and spacing as close to the original as possible (organize the code well, e.g. use classes instead of inline styles where feasible). If you see a white box with the text "picture", treat it as a spot where an image was removed and insert a placeholder image there instead.
+// Produces a short, text-only description of a page/element's structure
+// (sections + a few key layout numbers) instead of a full HTML dump — so the
+// resulting prompt can be handed to an AI to *rebuild* the layout without
+// carrying over the original text, images, or other copyrighted content.
+function analyzeLayout(root) {
+  const SECTION_KEYWORDS = [
+    { re: /hero|banner|jumbotron/i, name: "Hero section" },
+    { re: /pricing|plans?/i, name: "Pricing section" },
+    { re: /testimonial|review/i, name: "Testimonials section" },
+    { re: /faq/i, name: "FAQ section" },
+    { re: /contact/i, name: "Contact section" },
+    { re: /team/i, name: "Team section" },
+    { re: /cta|call-?to-?action/i, name: "CTA section" },
+    { re: /gallery|portfolio/i, name: "Gallery section" },
+    { re: /feature/i, name: "Features section" },
+    { re: /footer/i, name: "Footer" },
+    { re: /header/i, name: "Header" },
+  ];
 
-Here is the original layout (title: "${pageTitle}"):
+  const ITEM_KEYWORDS = [
+    { re: /feature/i, name: "feature cards" },
+    { re: /pricing|plan/i, name: "pricing plans" },
+    { re: /testimonial|review/i, name: "testimonials" },
+    { re: /team|member/i, name: "team members" },
+    { re: /faq/i, name: "FAQ items" },
+    { re: /product/i, name: "product cards" },
+    { re: /card/i, name: "cards" },
+  ];
 
-\`\`\`html
-${html}
-\`\`\``;
+  const classAndId = (el) => `${el.className || ""} ${el.id || ""}`;
+
+  function guessSectionName(el, index) {
+    if (el.tagName === "NAV") return "Navbar";
+    if (el.tagName === "FOOTER") return "Footer";
+    if (el.tagName === "HEADER") return el.querySelector("h1") ? "Hero section" : "Header";
+    const hay = classAndId(el);
+    for (const { re, name } of SECTION_KEYWORDS) {
+      if (re.test(hay)) return name;
+    }
+    if (index === 0 && el.querySelector("h1")) return "Hero section";
+    return `Section ${index + 1}`;
   }
-  return `คุณคือ Frontend Developer ช่วยสร้างหน้าเว็บนี้ขึ้นมาใหม่โดยใช้ HTML และ CSS ให้มีโครงสร้าง การจัดวาง สี ฟอนต์ และระยะห่างใกล้เคียงต้นฉบับมากที่สุด (จัดโค้ดให้เป็นระเบียบ เช่น แยก CSS เป็น class แทน inline style ถ้าเป็นไปได้) หากพบกล่องสีขาวที่มีข้อความ "picture" ให้เข้าใจว่าเป็นตำแหน่งรูปภาพที่ถูกเอาออกไป ให้ใส่ placeholder image แทนที่ตำแหน่งนั้น
 
-นี่คือ layout ต้นฉบับ (title: "${pageTitle}"):
+  function guessItemName(el) {
+    const hay = classAndId(el);
+    for (const { re, name } of ITEM_KEYWORDS) {
+      if (re.test(hay)) return name;
+    }
+    return "items";
+  }
 
-\`\`\`html
-${html}
-\`\`\``;
+  // Looks for the largest group of >=2 same-tag, same-class siblings inside
+  // `container` (e.g. a row of feature cards) so it can be reported as
+  // "3 feature cards" instead of listing every card individually.
+  function findRepeatingGroup(container) {
+    const candidates = [container, ...container.querySelectorAll("*")];
+    let best = null;
+    for (const parent of candidates) {
+      const children = Array.from(parent.children).filter((c) => getComputedStyle(c).display !== "none");
+      if (children.length < 2) continue;
+      const tag = children[0].tagName;
+      const sameTag = children.filter((c) => c.tagName === tag);
+      if (sameTag.length < 2) continue;
+      const firstClasses = new Set((children[0].className || "").toString().split(/\s+/).filter(Boolean));
+      if (!firstClasses.size) continue;
+      const classMatch = sameTag.slice(1).every((c) => {
+        const classes = (c.className || "").toString().split(/\s+/).filter(Boolean);
+        return classes.some((cl) => firstClasses.has(cl));
+      });
+      if (!classMatch) continue;
+      if (!best || sameTag.length > best.count) {
+        best = { count: sameTag.length, sample: children[0] };
+      }
+    }
+    return best;
+  }
+
+  const topLevel = Array.from(root.children).filter((el) => getComputedStyle(el).display !== "none");
+  const sections = topLevel.map((el, index) => {
+    const group = findRepeatingGroup(el);
+    return group ? `${group.count} ${guessItemName(group.sample)}` : guessSectionName(el, index);
+  });
+
+  function parseGridColumnCount(value) {
+    if (!value || value === "none") return null;
+    let depth = 0;
+    let count = 1;
+    for (const ch of value.trim()) {
+      if (ch === "(") depth++;
+      else if (ch === ")") depth--;
+      else if (ch === " " && depth === 0) count++;
+    }
+    return count;
+  }
+
+  let maxWidth = null;
+  let gridColumns = null;
+  const radiusCounts = new Map();
+
+  for (const el of [root, ...root.querySelectorAll("*")]) {
+    const cs = getComputedStyle(el);
+    if (!maxWidth && cs.maxWidth && cs.maxWidth !== "none") {
+      const px = parseFloat(cs.maxWidth);
+      if (px >= 480 && px <= 2000) maxWidth = `${Math.round(px)}px`;
+    }
+    if (!gridColumns && cs.display === "grid") {
+      const cols = parseGridColumnCount(cs.gridTemplateColumns);
+      if (cols && cols > 1) gridColumns = cols;
+    }
+    for (const prop of ["border-top-left-radius", "border-top-right-radius", "border-bottom-left-radius", "border-bottom-right-radius"]) {
+      const px = parseFloat(cs.getPropertyValue(prop));
+      if (px > 0) radiusCounts.set(px, (radiusCounts.get(px) || 0) + 1);
+    }
+  }
+
+  let borderRadius = null;
+  if (radiusCounts.size) {
+    const [topPx] = [...radiusCounts.entries()].sort((a, b) => b[1] - a[1])[0];
+    borderRadius = `${Math.round(topPx)}px`;
+  }
+
+  return { sections, maxWidth, gridColumns, borderRadius };
+}
+
+function buildStructuredPrompt(analysis, html) {
+  const lines = ["Analyze this website layout and recreate a similar structure.", "", "Page structure:"];
+  lines.push(...(analysis.sections.length ? analysis.sections.map((s) => `- ${s}`) : ["- (no clear top-level sections detected)"]));
+
+  const layoutLines = [];
+  if (analysis.maxWidth) layoutLines.push(`- Max width: ${analysis.maxWidth}`);
+  if (analysis.gridColumns) layoutLines.push(`- Grid: ${analysis.gridColumns} columns`);
+  if (analysis.borderRadius) layoutLines.push(`- Border radius: ${analysis.borderRadius}`);
+
+  lines.push("", "Layout:", ...(layoutLines.length ? layoutLines : ["- (no strong layout signals detected)"]));
+  lines.push("", "Do NOT copy text, images, logos, or copyrighted assets.", "", "Generate React + Tailwind CSS.");
+
+  if (html) {
+    lines.push(
+      "",
+      "Reference layout HTML below (structure/spacing reference only — do not copy its text, images, or logos):",
+      "",
+      "```html",
+      html,
+      "```"
+    );
+  }
+
+  return lines.join("\n");
 }
 
 // Lets the user click an element on the page to capture just that subtree
@@ -261,12 +389,14 @@ function startElementPicker(options = {}) {
       banner: "คลิกเลือก element ที่ต้องการ copy layout (กด Esc เพื่อยกเลิก)",
       downloaded: "ดาวน์โหลด layout ของ element แล้ว",
       copied: "คัดลอก layout ของ element แล้ว",
+      promptCopied: "คัดลอก Prompt แล้ว",
       copyFailed: (msg) => `คัดลอกไม่สำเร็จ: ${msg}`,
     },
     en: {
       banner: "Click the element you want to copy the layout of (press Esc to cancel)",
       downloaded: "Downloaded the element's layout",
       copied: "Copied the element's layout",
+      promptCopied: "Prompt copied",
       copyFailed: (msg) => `Copy failed: ${msg}`,
     },
   };
@@ -319,21 +449,33 @@ function startElementPicker(options = {}) {
     const target = currentTarget || e.target;
     cleanup();
 
-    const rawHtml = captureLayout({ excludeImages: options.excludeImages, root: target });
-    const output = options.promptMode ? buildLayoutPrompt(rawHtml, document.title, options.lang) : rawHtml;
+    if (options.action === "prompt") {
+      const analysis = analyzeLayout(target);
+      const html = options.includeHtml ? captureLayout({ excludeImages: options.excludeImages, root: target }) : null;
+      const prompt = buildStructuredPrompt(analysis, html);
+      try {
+        await navigator.clipboard.writeText(prompt);
+        showToast(s.promptCopied);
+      } catch (err) {
+        showToast(s.copyFailed(err.message));
+      }
+      return;
+    }
+
+    const html = captureLayout({ excludeImages: options.excludeImages, root: target });
 
     if (options.action === "download") {
-      const blob = new Blob([output], { type: options.promptMode ? "text/plain" : "text/html" });
+      const blob = new Blob([html], { type: "text/html" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = options.promptMode ? "element-layout-prompt.txt" : "element-layout.html";
+      a.download = "element-layout.html";
       a.click();
       URL.revokeObjectURL(url);
       showToast(s.downloaded);
     } else {
       try {
-        await navigator.clipboard.writeText(output);
+        await navigator.clipboard.writeText(html);
         showToast(s.copied);
       } catch (err) {
         showToast(s.copyFailed(err.message));

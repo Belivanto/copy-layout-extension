@@ -1,13 +1,14 @@
 const copyBtn = document.getElementById("copyBtn");
+const promptBtn = document.getElementById("promptBtn");
 const downloadBtn = document.getElementById("downloadBtn");
 const excludeImagesCheckbox = document.getElementById("excludeImages");
 const pickElementCheckbox = document.getElementById("pickElement");
-const promptModeCheckbox = document.getElementById("promptMode");
+const includeHtmlCheckbox = document.getElementById("includeHtml");
 const statusEl = document.getElementById("status");
 const subtitleEl = document.getElementById("subtitle");
 const excludeImagesLabel = document.getElementById("excludeImagesLabel");
 const pickElementLabel = document.getElementById("pickElementLabel");
-const promptModeLabel = document.getElementById("promptModeLabel");
+const includeHtmlLabel = document.getElementById("includeHtmlLabel");
 const langThBtn = document.getElementById("langTh");
 const langEnBtn = document.getElementById("langEn");
 
@@ -16,13 +17,16 @@ const STRINGS = {
     subtitle: "จับโครงสร้างและสไตล์ของหน้าเว็บที่กำลังดูอยู่",
     excludeImages: "ไม่รวมรูปภาพ (แทนที่ด้วยกล่องสีขาว)",
     pickElement: "เลือกเฉพาะ element (คลิกบนหน้าเว็บ)",
-    promptMode: "สร้างเป็น Prompt สำหรับ AI (มีคำสั่งกำกับ)",
+    includeHtml: "แนบ Layout HTML ไปกับ Prompt ด้วย",
     copyBtn: "คัดลอก Layout",
+    promptBtn: "คัดลอก Prompt",
     downloadBtn: "ดาวน์โหลด HTML",
     cantCapture: "ไม่สามารถจับภาพหน้านี้ได้",
     capturing: "กำลังจับภาพ layout…",
+    analyzing: "กำลังวิเคราะห์ layout…",
     pickPrompt: "คลิกที่ element บนหน้าเว็บที่ต้องการ…",
     copied: "คัดลอก layout ไปยังคลิปบอร์ดแล้ว!",
+    promptCopied: "คัดลอก Prompt แล้ว!",
     downloaded: "ดาวน์โหลด layout แล้ว!",
     failed: "จับภาพ layout ไม่สำเร็จ",
   },
@@ -30,13 +34,16 @@ const STRINGS = {
     subtitle: "Capture the current page's structure & styles",
     excludeImages: "Exclude images (replace with white boxes)",
     pickElement: "Pick a specific element (click on the page)",
-    promptMode: "Generate as an AI prompt (with instructions)",
+    includeHtml: "Attach layout HTML to the prompt too",
     copyBtn: "Copy Layout",
+    promptBtn: "Copy Prompt",
     downloadBtn: "Download HTML",
     cantCapture: "This page can't be captured.",
     capturing: "Capturing layout…",
+    analyzing: "Analyzing layout…",
     pickPrompt: "Click the element on the page you want…",
     copied: "Layout copied to clipboard!",
+    promptCopied: "Prompt copied to clipboard!",
     downloaded: "Layout downloaded!",
     failed: "Failed to capture layout.",
   },
@@ -53,8 +60,9 @@ function applyLanguage() {
   subtitleEl.textContent = t("subtitle");
   excludeImagesLabel.textContent = t("excludeImages");
   pickElementLabel.textContent = t("pickElement");
-  promptModeLabel.textContent = t("promptMode");
+  includeHtmlLabel.textContent = t("includeHtml");
   copyBtn.textContent = t("copyBtn");
+  promptBtn.textContent = t("promptBtn");
   downloadBtn.textContent = t("downloadBtn");
   langThBtn.classList.toggle("active", lang === "th");
   langEnBtn.classList.toggle("active", lang === "en");
@@ -79,6 +87,7 @@ function setStatus(message, type) {
 
 function setBusy(busy) {
   copyBtn.disabled = busy;
+  promptBtn.disabled = busy;
   downloadBtn.disabled = busy;
 }
 
@@ -87,48 +96,53 @@ async function getActiveTab() {
   return tab;
 }
 
-async function captureCurrentTab() {
+async function ensureCapturableTab() {
   const tab = await getActiveTab();
   if (!tab || !tab.id || !/^https?:/.test(tab.url || "")) {
     throw new Error(t("cantCapture"));
   }
-
   await chrome.scripting.executeScript({
     target: { tabId: tab.id },
     files: ["content.js"],
   });
+  return tab;
+}
 
+async function captureCurrentTab() {
+  const tab = await ensureCapturableTab();
   const options = { excludeImages: excludeImagesCheckbox.checked };
-  const promptMode = promptModeCheckbox.checked;
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
-    func: (opts, wrapAsPrompt, promptLang) => {
-      const html = captureLayout(opts);
-      return wrapAsPrompt ? buildLayoutPrompt(html, document.title, promptLang) : html;
-    },
-    args: [options, promptMode, lang],
+    func: (opts) => captureLayout(opts),
+    args: [options],
   });
+  return { html: result, title: tab.title || "page" };
+}
 
-  return { html: result, title: tab.title || "page", promptMode };
+async function capturePromptForCurrentTab() {
+  const tab = await ensureCapturableTab();
+  const options = { excludeImages: excludeImagesCheckbox.checked };
+  const includeHtml = includeHtmlCheckbox.checked;
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: (opts, withHtml) => {
+      const analysis = analyzeLayout(document.body);
+      const html = withHtml ? captureLayout(opts) : null;
+      return buildStructuredPrompt(analysis, html);
+    },
+    args: [options, includeHtml],
+  });
+  return result;
 }
 
 // Runs the picker in the page itself: the user clicks an element there, and
 // the picker performs the copy/download right at that click (the popup will
 // already be closed by the time they click the page).
 async function startPicker(action) {
-  const tab = await getActiveTab();
-  if (!tab || !tab.id || !/^https?:/.test(tab.url || "")) {
-    throw new Error(t("cantCapture"));
-  }
-
-  await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    files: ["content.js"],
-  });
-
+  const tab = await ensureCapturableTab();
   const options = {
     excludeImages: excludeImagesCheckbox.checked,
-    promptMode: promptModeCheckbox.checked,
+    includeHtml: includeHtmlCheckbox.checked,
     lang,
     action,
   };
@@ -158,6 +172,25 @@ copyBtn.addEventListener("click", async () => {
   }
 });
 
+promptBtn.addEventListener("click", async () => {
+  setBusy(true);
+  try {
+    if (pickElementCheckbox.checked) {
+      setStatus(t("pickPrompt"));
+      await startPicker("prompt");
+    } else {
+      setStatus(t("analyzing"));
+      const prompt = await capturePromptForCurrentTab();
+      await navigator.clipboard.writeText(prompt);
+      setStatus(t("promptCopied"), "success");
+    }
+  } catch (err) {
+    setStatus(err.message || t("failed"), "error");
+  } finally {
+    setBusy(false);
+  }
+});
+
 downloadBtn.addEventListener("click", async () => {
   setBusy(true);
   try {
@@ -166,11 +199,10 @@ downloadBtn.addEventListener("click", async () => {
       await startPicker("download");
     } else {
       setStatus(t("capturing"));
-      const { html, title, promptMode } = await captureCurrentTab();
-      const blob = new Blob([html], { type: promptMode ? "text/plain" : "text/html" });
+      const { html, title } = await captureCurrentTab();
+      const blob = new Blob([html], { type: "text/html" });
       const url = URL.createObjectURL(blob);
-      const ext = promptMode ? "txt" : "html";
-      const filename = `${title.replace(/[^a-z0-9-_]+/gi, "-").slice(0, 60) || "layout"}.${ext}`;
+      const filename = `${title.replace(/[^a-z0-9-_]+/gi, "-").slice(0, 60) || "layout"}.html`;
       const a = document.createElement("a");
       a.href = url;
       a.download = filename;
